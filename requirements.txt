@@ -1,10 +1,5 @@
 fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-httpx
+uvicorn
 yt-dlp
-requests
-aiofiles
-beautifulsoup4
-lxml
+pydantic
+python-multipart
