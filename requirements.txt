@@ -1,5 +1,5 @@
-fastapi
-uvicorn
-yt-dlp
-pydantic
-python-multipart
+fastapi==0.111.2
+uvicorn==0.25.2
+pydantic==2.6.6
+yt-dlp==2025.11.28
+ffmpeg-python==0.2.2

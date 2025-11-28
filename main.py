@@ -10,6 +10,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
 
+#=======================================================
+# OS
+#=======================================================
+
+os.environ["PATH"] = os.path.join(os.getcwd(), "bin") + os.pathsep + os.environ.get("PATH", "")
+
 # ======================================================
 # FASTAPI + CORS
 # ======================================================
