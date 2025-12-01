@@ -23,19 +23,25 @@ app.add_middleware(
 )
 
 # ======================================================
-# REQUEST MODEL
+# REQUEST MODELS (FIXED)
 # ======================================================
 
-class DownloadReq(BaseModel):
+class PreviewRequest(BaseModel):
+    url: str
+    platform: str
+
+class SizeRequest(BaseModel):
+    url: str
+    platform: str
+
+class DownloadRequest(BaseModel):
     url: str
     platform: str
     quality: str = "auto"
-    compress: bool = False
+
 
 # ======================================================
 # UTIL: FFMPEG
-# Back4App Container → ffmpeg sudah tersedia jika
-# Anda install via Dockerfile "apt-get install ffmpeg"
 # ======================================================
 
 def get_ffmpeg():
@@ -49,7 +55,7 @@ def get_ffmpeg():
 # ======================================================
 
 download_queue = queue.Queue()
-results = {}  # task_id → result
+results = {}
 
 def worker_thread():
     while True:
@@ -69,7 +75,7 @@ threading.Thread(target=worker_thread, daemon=True).start()
 PROXY = "https://video-proxy.fly.dev"
 USE_PROXY = False
 
-def make_ydl_opts(req: DownloadReq, output_template):
+def make_ydl_opts(req: DownloadRequest, output_template):
     ffmpeg = get_ffmpeg()
 
     ydl_opts = {
@@ -99,7 +105,7 @@ def make_ydl_opts(req: DownloadReq, output_template):
 # PROCESS DOWNLOAD
 # ======================================================
 
-def process_download(req: DownloadReq):
+def process_download(req: DownloadRequest):
     uid = str(uuid.uuid4())[:8]
     os.makedirs("downloads", exist_ok=True)
     template = f"downloads/{uid}.%(ext)s"
@@ -116,13 +122,6 @@ def process_download(req: DownloadReq):
     if os.path.exists(original_path) and original_path != final_file:
         shutil.move(original_path, final_file)
 
-    # OPTIONAL compression
-    if req.compress:
-        compressed = f"downloads/{uid}_c.mp4"
-        ffmpeg = get_ffmpeg()
-        os.system(f'{ffmpeg} -i "{final_file}" -vcodec libx264 -crf 28 -preset fast "{compressed}"')
-        final_file = compressed
-
     return {
         "file": f"/api/file/{os.path.basename(final_file)}",
         "filename": os.path.basename(final_file)
@@ -136,12 +135,12 @@ def process_download(req: DownloadReq):
 def root():
     return {"status": "Backend aktif", "queue": download_queue.qsize()}
 
+# -------- PREVIEW ----------
 @app.post("/api/preview")
 async def api_preview(data: PreviewRequest):
     try:
-        url, platform = data.url, data.platform
+        url = data.url
 
-        # Ambil metadata
         with YoutubeDL({"quiet": True}) as ydl:
             info = ydl.extract_info(url, download=False)
             preview_url = info.get("thumbnail")
@@ -150,16 +149,18 @@ async def api_preview(data: PreviewRequest):
     except Exception as e:
         raise HTTPException(500, f"Preview gagal: {e}")
 
+# -------- VIDEO SIZES ----------
 @app.post("/api/video-sizes")
 async def api_video_sizes(data: SizeRequest):
     try:
-        url, platform = data.url, data.platform
+        url = data.url
 
         ydl_opts = {"quiet": True, "skip_download": True}
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
         formats = info.get("formats", [])
+
         sizes = {
             "auto": info.get("filesize") or "–",
             "360p": "–",
@@ -169,24 +170,33 @@ async def api_video_sizes(data: SizeRequest):
 
         for fmt in formats:
             q = fmt.get("height")
-            if q == 360: sizes["360p"] = fmt.get("filesize") or "–"
-            if q == 720: sizes["720p"] = fmt.get("filesize") or "–"
-            if q == 1080: sizes["1080p"] = fmt.get("filesize") or "–"
+            if q == 360:
+                sizes["360p"] = fmt.get("filesize") or "–"
+            if q == 720:
+                sizes["720p"] = fmt.get("filesize") or "–"
+            if q == 1080:
+                sizes["1080p"] = fmt.get("filesize") or "–"
 
         return sizes
     except Exception as e:
         raise HTTPException(500, f"Gagal size: {e}")
 
+# -------- DOWNLOAD ----------
 @app.post("/api/download")
 async def api_download(data: DownloadRequest):
     try:
         url = data.url
-        quality = data.quality or "auto"
+        quality = data.quality
 
-        # Pilih kualitas
+        ydl_quality = (
+            "best"
+            if quality == "auto"
+            else f"bestvideo[height<={quality.replace('p','')}]+bestaudio/best"
+        )
+
         ydl_opts = {
-            "format": "best" if quality == "auto" else f"bestvideo[height<={quality.replace('p','')}]+bestaudio/best",
-            "outtmpl": "downloads/%(id)s-%(resolution)s.%(ext)s",
+            "format": ydl_quality,
+            "outtmpl": "downloads/%(id)s-%(height)s.%(ext)s",
         }
 
         os.makedirs("downloads", exist_ok=True)
@@ -204,13 +214,7 @@ async def api_download(data: DownloadRequest):
     except Exception as e:
         raise HTTPException(500, f"Download gagal: {e}")
 
-@app.get("/api/status/{task_id}")
-def status(task_id: str):
-    result = results.get(task_id)
-    if result is None:
-        return {"status": "processing", "queue": download_queue.qsize()}
-    return {"status": "done", "result": result}
-
+# -------- FILE SERVE ----------
 @app.get("/api/file/{filename}")
 async def api_file(filename: str):
     filepath = f"downloads/{filename}"
@@ -219,7 +223,7 @@ async def api_file(filename: str):
     return FileResponse(filepath, filename=filename)
 
 # ======================================================
-# BACK4APP ENTRYPOINT (penting)
+# ENTRYPOINT
 # ======================================================
 
 if __name__ == "__main__":
