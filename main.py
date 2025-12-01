@@ -137,50 +137,72 @@ def root():
     return {"status": "Backend aktif", "queue": download_queue.qsize()}
 
 @app.post("/api/preview")
-def preview(req: DownloadReq):
+async def api_preview(data: PreviewRequest):
     try:
+        url, platform = data.url, data.platform
+
+        # Ambil metadata
         with YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-        return {
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "platform": req.platform
-        }
+            info = ydl.extract_info(url, download=False)
+            preview_url = info.get("thumbnail")
+
+        return {"preview_url": preview_url}
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(500, f"Preview gagal: {e}")
 
 @app.post("/api/video-sizes")
-def video_sizes(req: DownloadReq):
+async def api_video_sizes(data: SizeRequest):
     try:
-        with YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(req.url, download=False)
+        url, platform = data.url, data.platform
+
+        ydl_opts = {"quiet": True, "skip_download": True}
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
         formats = info.get("formats", [])
+        sizes = {
+            "auto": info.get("filesize") or "–",
+            "360p": "–",
+            "720p": "–",
+            "1080p": "–",
+        }
 
-        def size_for(h):
-            for f in formats:
-                if f.get("height") == h:
-                    sz = f.get("filesize") or f.get("filesize_approx")
-                    if sz:
-                        return f"{round(sz/1024/1024, 2)} MB"
-            return "–"
+        for fmt in formats:
+            q = fmt.get("height")
+            if q == 360: sizes["360p"] = fmt.get("filesize") or "–"
+            if q == 720: sizes["720p"] = fmt.get("filesize") or "–"
+            if q == 1080: sizes["1080p"] = fmt.get("filesize") or "–"
 
+        return sizes
+    except Exception as e:
+        raise HTTPException(500, f"Gagal size: {e}")
+
+@app.post("/api/download")
+async def api_download(data: DownloadRequest):
+    try:
+        url = data.url
+        quality = data.quality or "auto"
+
+        # Pilih kualitas
+        ydl_opts = {
+            "format": "best" if quality == "auto" else f"bestvideo[height<={quality.replace('p','')}]+bestaudio/best",
+            "outtmpl": "downloads/%(id)s-%(resolution)s.%(ext)s",
+        }
+
+        os.makedirs("downloads", exist_ok=True)
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+
+        endpoint = f"/api/file/{os.path.basename(filename)}"
         return {
-            "360p": size_for(360),
-            "720p": size_for(720),
-            "1080p": size_for(1080),
-            "auto": size_for(info.get("height"))
+            "file_endpoint": endpoint,
+            "filename": os.path.basename(filename),
         }
 
     except Exception as e:
-        raise HTTPException(400, str(e))
-
-@app.post("/api/download")
-def queue_download(req: DownloadReq):
-    task_id = str(uuid.uuid4())
-    results[task_id] = None
-    download_queue.put((task_id, req))
-    return {"task_id": task_id, "status": "queued"}
+        raise HTTPException(500, f"Download gagal: {e}")
 
 @app.get("/api/status/{task_id}")
 def status(task_id: str):
@@ -190,11 +212,11 @@ def status(task_id: str):
     return {"status": "done", "result": result}
 
 @app.get("/api/file/{filename}")
-def file(filename: str):
-    path = f"downloads/{filename}"
-    if not os.path.exists(path):
-        raise HTTPException(404, "File not found.")
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+async def api_file(filename: str):
+    filepath = f"downloads/{filename}"
+    if not os.path.exists(filepath):
+        raise HTTPException(404, "File tidak ditemukan")
+    return FileResponse(filepath, filename=filename)
 
 # ======================================================
 # BACK4APP ENTRYPOINT (penting)
