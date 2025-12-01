@@ -10,12 +10,6 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
 
-#=======================================================
-# OS
-#=======================================================
-
-os.environ["PATH"] = os.path.join(os.getcwd(), "bin") + os.pathsep + os.environ.get("PATH", "")
-
 # ======================================================
 # FASTAPI + CORS
 # ======================================================
@@ -39,19 +33,16 @@ class DownloadReq(BaseModel):
     compress: bool = False
 
 # ======================================================
-# UTIL: FFMPEG path
+# UTIL: FFMPEG
+# Back4App Container → ffmpeg sudah tersedia jika
+# Anda install via Dockerfile "apt-get install ffmpeg"
 # ======================================================
 
 def get_ffmpeg():
     p = shutil.which("ffmpeg")
     if p:
         return p
-
-    # user may upload ffmpeg binary to root
-    if os.path.exists("./ffmpeg"):
-        return "./ffmpeg"
-
-    raise HTTPException(500, "FFmpeg tidak ditemukan di Replit. Upload binary ke root.")
+    raise HTTPException(500, "FFmpeg tidak ditemukan di server.")
 
 # ======================================================
 # DOWNLOAD QUEUE
@@ -72,11 +63,11 @@ def worker_thread():
 threading.Thread(target=worker_thread, daemon=True).start()
 
 # ======================================================
-# PROXY SETTING (untuk FB/TikTok/IG)
+# PROXY (opsional)
 # ======================================================
 
-PROXY = "https://video-proxy.fly.dev"   # opsional, kamu bisa ganti
-USE_PROXY = False                      # switch-on kalau perlu
+PROXY = "https://video-proxy.fly.dev"
+USE_PROXY = False
 
 def make_ydl_opts(req: DownloadReq, output_template):
     ffmpeg = get_ffmpeg()
@@ -87,8 +78,10 @@ def make_ydl_opts(req: DownloadReq, output_template):
         "merge_output_format": "mp4",
         "ffmpeg_location": ffmpeg,
         "outtmpl": output_template,
-        "proxy": PROXY if USE_PROXY else None,
     }
+
+    if USE_PROXY:
+        ydl_opts["proxy"] = PROXY
 
     # Target quality
     if req.quality == "360p":
@@ -103,7 +96,7 @@ def make_ydl_opts(req: DownloadReq, output_template):
     return ydl_opts
 
 # ======================================================
-# PROCESS DOWNLOAD (actual executor)
+# PROCESS DOWNLOAD
 # ======================================================
 
 def process_download(req: DownloadReq):
@@ -119,15 +112,15 @@ def process_download(req: DownloadReq):
     original_path = ydl.prepare_filename(info)
     final_file = f"downloads/{uid}.mp4"
 
-    # rename
+    # rename output
     if os.path.exists(original_path) and original_path != final_file:
         shutil.move(original_path, final_file)
 
-    # OPTIONAL COMPRESSION
+    # OPTIONAL compression
     if req.compress:
         compressed = f"downloads/{uid}_c.mp4"
         ffmpeg = get_ffmpeg()
-        os.system(f'{ffmpeg} -i {final_file} -vcodec libx264 -crf 28 -preset fast {compressed}')
+        os.system(f'{ffmpeg} -i "{final_file}" -vcodec libx264 -crf 28 -preset fast "{compressed}"')
         final_file = compressed
 
     return {
@@ -148,7 +141,6 @@ def preview(req: DownloadReq):
     try:
         with YoutubeDL({"quiet": True}) as ydl:
             info = ydl.extract_info(req.url, download=False)
-
         return {
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
@@ -203,3 +195,12 @@ def file(filename: str):
     if not os.path.exists(path):
         raise HTTPException(404, "File not found.")
     return FileResponse(path, media_type="video/mp4", filename=filename)
+
+# ======================================================
+# BACK4APP ENTRYPOINT (penting)
+# ======================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
