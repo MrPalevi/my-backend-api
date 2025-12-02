@@ -1,6 +1,7 @@
 import os
 import uuid
 import shutil
+import requests
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +60,8 @@ class RenameRequest(BaseModel):
     old_name: str
     new_name: str
 
+class CdnRequest(BaseModel):
+    url: str
 
 # ======================================================
 # ROOT
@@ -236,7 +239,35 @@ async def api_mp3_rename(data: RenameRequest):
         "file_endpoint": f"/api/file/{data.new_name}"
     }
 
+# ======================================================
+# DOWNLOAD VIDEO FROM CDN.VIDEY.CO
+# ======================================================
 
+@app.post("/api/download-cdn")
+async def api_download_cdn(req: CdnRequest):
+    cdn_url = req.url.strip()
+
+    if not cdn_url.startswith("https://cdn.videy.co"):
+        raise HTTPException(400, "URL bukan CDN Videy!")
+
+    try:
+        uid = uuid.uuid4().hex
+        filename = f"{uid}.mp4"
+        file_path = os.path.join(DOWNLOAD_DIR, filename)
+
+        with requests.get(cdn_url, stream=True) as r:
+            r.raise_for_status()
+            with open(file_path, "wb") as f:
+                shutil.copyfileobj(r.raw, f)
+
+        return {
+            "status": "success",
+            "filename": filename,
+            "file_endpoint": f"/api/file/{filename}"
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Gagal download dari CDN: {e}")
 # ======================================================
 # SERVE FILE
 # ======================================================
