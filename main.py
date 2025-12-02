@@ -1,8 +1,6 @@
 import os
 import uuid
 import shutil
-import queue
-import threading
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +9,15 @@ from pydantic import BaseModel
 from yt_dlp import YoutubeDL
 
 # ======================================================
-# FASTAPI + CORS
+# PATHS: RAILWAY SAFE
+# ======================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# ======================================================
+# FASTAPI
 # ======================================================
 
 app = FastAPI()
@@ -22,17 +28,20 @@ app.add_middleware(
     allow_methods=["*"],
 )
 
+
 # ======================================================
-# REQUEST MODELS (FIXED)
+# MODELS
 # ======================================================
 
 class PreviewRequest(BaseModel):
     url: str
     platform: str
 
+
 class SizeRequest(BaseModel):
     url: str
     platform: str
+
 
 class DownloadRequest(BaseModel):
     url: str
@@ -41,186 +50,99 @@ class DownloadRequest(BaseModel):
 
 
 # ======================================================
-# UTIL: FFMPEG
-# ======================================================
-
-def get_ffmpeg():
-    p = shutil.which("ffmpeg")
-    if p:
-        return p
-    raise HTTPException(500, "FFmpeg tidak ditemukan di server.")
-
-# ======================================================
-# DOWNLOAD QUEUE
-# ======================================================
-
-download_queue = queue.Queue()
-results = {}
-
-def worker_thread():
-    while True:
-        task_id, req = download_queue.get()
-        try:
-            results[task_id] = process_download(req)
-        except Exception as e:
-            results[task_id] = {"error": str(e)}
-        download_queue.task_done()
-
-threading.Thread(target=worker_thread, daemon=True).start()
-
-# ======================================================
-# PROXY (opsional)
-# ======================================================
-
-PROXY = "https://video-proxy.fly.dev"
-USE_PROXY = False
-
-def make_ydl_opts(req: DownloadRequest, output_template):
-    ffmpeg = get_ffmpeg()
-
-    ydl_opts = {
-        "quiet": True,
-        "noplaylist": True,
-        "merge_output_format": "mp4",
-        "ffmpeg_location": ffmpeg,
-        "outtmpl": output_template,
-    }
-
-    if USE_PROXY:
-        ydl_opts["proxy"] = PROXY
-
-    # Target quality
-    if req.quality == "360p":
-        ydl_opts["format"] = "bestvideo[height<=360]+bestaudio/best"
-    elif req.quality == "720p":
-        ydl_opts["format"] = "bestvideo[height<=720]+bestaudio/best"
-    elif req.quality == "1080p":
-        ydl_opts["format"] = "bestvideo[height<=1080]+bestaudio/best"
-    else:
-        ydl_opts["format"] = "bestvideo+bestaudio/best"
-
-    return ydl_opts
-
-# ======================================================
-# PROCESS DOWNLOAD
-# ======================================================
-
-def process_download(req: DownloadRequest):
-    uid = str(uuid.uuid4())[:8]
-    os.makedirs("downloads", exist_ok=True)
-    template = f"downloads/{uid}.%(ext)s"
-
-    ydl_opts = make_ydl_opts(req, template)
-
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(req.url, download=True)
-
-    original_path = ydl.prepare_filename(info)
-    final_file = f"downloads/{uid}.mp4"
-
-    # rename output
-    if os.path.exists(original_path) and original_path != final_file:
-        shutil.move(original_path, final_file)
-
-    return {
-        "file": f"/api/file/{os.path.basename(final_file)}",
-        "filename": os.path.basename(final_file)
-    }
-
-# ======================================================
-# API ENDPOINTS
+# ROOT
 # ======================================================
 
 @app.get("/")
 def root():
-    return {"status": "Backend aktif", "queue": download_queue.qsize()}
+    return {"status": "backend is running"}
 
-# -------- PREVIEW ----------
+
+# ======================================================
+# PREVIEW
+# ======================================================
+
 @app.post("/api/preview")
 async def api_preview(data: PreviewRequest):
     try:
-        url = data.url
-
         with YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            preview_url = info.get("thumbnail")
-
-        return {"preview_url": preview_url}
+            info = ydl.extract_info(data.url, download=False)
+        return {"preview_url": info.get("thumbnail")}
     except Exception as e:
-        raise HTTPException(500, f"Preview gagal: {e}")
+        raise HTTPException(500, f"Preview error: {e}")
 
-# -------- VIDEO SIZES ----------
+
+# ======================================================
+# VIDEO SIZE
+# ======================================================
+
 @app.post("/api/video-sizes")
 async def api_video_sizes(data: SizeRequest):
     try:
-        url = data.url
-
-        ydl_opts = {"quiet": True, "skip_download": True}
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        with YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(data.url, download=False)
 
         formats = info.get("formats", [])
 
-        sizes = {
-            "auto": info.get("filesize") or "–",
-            "360p": "–",
-            "720p": "–",
-            "1080p": "–",
-        }
+        sizes = {"auto": info.get("filesize") or "–", "360p": "–", "720p": "–", "1080p": "–"}
 
-        for fmt in formats:
-            q = fmt.get("height")
-            if q == 360:
-                sizes["360p"] = fmt.get("filesize") or "–"
-            if q == 720:
-                sizes["720p"] = fmt.get("filesize") or "–"
-            if q == 1080:
-                sizes["1080p"] = fmt.get("filesize") or "–"
+        for f in formats:
+            h = f.get("height")
+            if h in (360, 720, 1080):
+                sizes[f"{h}p"] = f.get("filesize") or "–"
 
         return sizes
-    except Exception as e:
-        raise HTTPException(500, f"Gagal size: {e}")
 
-# -------- DOWNLOAD ----------
+    except Exception as e:
+        raise HTTPException(500, f"Size error: {e}")
+
+
+# ======================================================
+# DOWNLOAD
+# ======================================================
+
 @app.post("/api/download")
 async def api_download(data: DownloadRequest):
     try:
-        url = data.url
         quality = data.quality
+        if quality == "auto":
+            fmt = "best"
+        else:
+            h = quality.replace("p", "")
+            fmt = f"bestvideo[height<={h}]+bestaudio/best"
 
-        ydl_quality = (
-            "best"
-            if quality == "auto"
-            else f"bestvideo[height<={quality.replace('p','')}]+bestaudio/best"
-        )
+        uid = str(uuid.uuid4())[:8]
+        output_template = os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
 
         ydl_opts = {
-            "format": ydl_quality,
-            "outtmpl": "downloads/%(id)s-%(height)s.%(ext)s",
+            "format": fmt,
+            "outtmpl": output_template,
+            "quiet": True,
+            "merge_output_format": "mp4",  # works without ffmpeg on most YT formats
         }
-
-        os.makedirs("downloads", exist_ok=True)
 
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            info = ydl.extract_info(data.url, download=True)
+            final_path = ydl.prepare_filename(info)
 
-        endpoint = f"/api/file/{os.path.basename(filename)}"
-        return {
-            "file_endpoint": endpoint,
-            "filename": os.path.basename(filename),
-        }
+        filename = os.path.basename(final_path)
+        return {"file_endpoint": f"/api/file/{filename}", "filename": filename}
 
     except Exception as e:
-        raise HTTPException(500, f"Download gagal: {e}")
+        raise HTTPException(500, f"Download error: {e}")
 
-# -------- FILE SERVE ----------
+
+# ======================================================
+# SERVE FILE
+# ======================================================
+
 @app.get("/api/file/{filename}")
 async def api_file(filename: str):
-    filepath = f"downloads/{filename}"
-    if not os.path.exists(filepath):
-        raise HTTPException(404, "File tidak ditemukan")
-    return FileResponse(filepath, filename=filename)
+    path = os.path.join(DOWNLOAD_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "File not found")
+    return FileResponse(path, filename=filename)
+
 
 # ======================================================
 # ENTRYPOINT
