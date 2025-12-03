@@ -1,8 +1,10 @@
 import os
 import uuid
+import httpx
 import shutil
 import requests
 
+from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -250,24 +252,43 @@ async def api_download_cdn(req: CdnRequest):
     if not cdn_url.startswith("https://cdn.videy.co"):
         raise HTTPException(400, "URL bukan CDN Videy!")
 
+    # Tambahkan header biar CDN ga blokir
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+        "Referer": "https://www.tiktok.com/",
+        "Origin": "https://www.tiktok.com",
+        "Accept": "*/*",
+    }
+
     try:
-        uid = uuid.uuid4().hex
-        filename = f"{uid}.mp4"
-        file_path = os.path.join(DOWNLOAD_DIR, filename)
+        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
+            response = await client.get(cdn_url, headers=headers)
 
-        with requests.get(cdn_url, stream=True) as r:
-            r.raise_for_status()
-            with open(file_path, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
+            # Kalau CDN kasih error → langsung kirim ke Flutter
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CDN error {response.status_code}"
+                )
 
-        return {
-            "status": "success",
-            "filename": filename,
-            "file_endpoint": f"/api/file/{filename}"
-        }
+            # Pastikan ini video!
+            content_type = response.headers.get("content-type", "video/mp4")
+            if not content_type.startswith(("video/", "application/octet-stream")):
+                raise HTTPException(400, "Bukan file video!")
+
+            # INI YANG PALING PENTING: LANGSUNG STREAMING KE FLUTTER!
+            return StreamingResponse(
+                response.aiter_bytes(),
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": 'attachment; filename="video.mp4"',
+                    "Content-Length": response.headers.get("content-length"),
+                    "Accept-Ranges": "bytes",
+                }
+            )
 
     except Exception as e:
-        raise HTTPException(500, f"Gagal download dari CDN: {e}")
+        raise HTTPException(500, f"Gagal download dari CDN: {str(e)}")
 # ======================================================
 # SERVE FILE
 # ======================================================
